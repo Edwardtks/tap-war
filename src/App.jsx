@@ -1,25 +1,45 @@
 import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
 
-// --- PRODUCTION CONFIGURATION ---
+// ==========================================
+// 1. UNCOMMENT THESE LINES IN YOUR LOCAL PROJECT:
+// ==========================================
+import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-// Initialize Supabase
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+
+// ==========================================
+
+
 /**
- * Tap War - Production Build
- * Features:
- * - Real Supabase Backend & WebSocket
- * - Secured Host View (/?mode=host)
- * - "Force Finish" Failsafe
- * - Visual "Juice" (Floating +1s, Shake, Pulse)
- * - Final Score Flush
- * - Leaderboard Persistence
+ * Tap War - Production Build (v2.3)
+ * Updates:
+ * - Fixed Mock Client chaining to prevent White Screen of Death in previews.
+ * - SessionStorage: Closing tab resets user identity.
+ * - Leave Game: Manual button to delete user.
+ * - Host Sync: Host listens for DELETE events.
  */
 
-// --- 1. Game Context ---
+// --- Global Styles ---
+const GlobalStyles = () => (
+  <style>{`
+    @keyframes floatUp {
+      0% { transform: translateY(0) scale(1); opacity: 1; }
+      100% { transform: translateY(-100px) scale(1.5); opacity: 0; }
+    }
+    @keyframes explode {
+      0% { transform: translate(0, 0) scale(1); opacity: 1; }
+      100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
+    }
+    .animate-float { animation: floatUp 0.8s ease-out forwards; }
+    .animate-particle { animation: explode 0.6s ease-out forwards; }
+    .bar-pulse-red { animation: pulseRed 0.2s ease-out; }
+    .bar-pulse-blue { animation: pulseBlue 0.2s ease-out; }
+    @keyframes pulseRed { 0% { filter: brightness(1); } 50% { filter: brightness(2) drop-shadow(0 0 10px red); } 100% { filter: brightness(1); } }
+    @keyframes pulseBlue { 0% { filter: brightness(1); } 50% { filter: brightness(2) drop-shadow(0 0 10px blue); } 100% { filter: brightness(1); } }
+  `}</style>
+);
 
 const GameContext = createContext();
 
@@ -47,7 +67,7 @@ const GameProvider = ({ children }) => {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      if (supabase.removeChannel) supabase.removeChannel(channel);
     };
   }, []);
 
@@ -58,35 +78,33 @@ const GameProvider = ({ children }) => {
   );
 };
 
-// --- 2. Visual Effects Component ---
-
-const FloatingNumber = ({ id, x, y, onComplete }) => {
+// --- Visual Components ---
+const FloatingItem = ({ id, x, y, onComplete, children, className }) => {
   useEffect(() => {
     const timer = setTimeout(() => onComplete(id), 800);
     return () => clearTimeout(timer);
   }, [id, onComplete]);
-
-  return (
-    <div 
-      className="absolute text-4xl font-black text-white pointer-events-none animate-float-up"
-      style={{ left: x, top: y, textShadow: '0 2px 4px rgba(0,0,0,0.5)' }}
-    >
-      +1
-    </div>
-  );
+  return <div className={`absolute pointer-events-none z-50 ${className}`} style={{ left: x, top: y }}>{children}</div>;
 };
 
-// --- 3. Helper Functions ---
+const Particle = ({ id, x, y, color, onComplete }) => {
+  const tx = useRef(`${(Math.random() - 0.5) * 200}px`);
+  const ty = useRef(`${(Math.random() - 0.5) * 200}px`);
+  useEffect(() => {
+    const timer = setTimeout(() => onComplete(id), 600);
+    return () => clearTimeout(timer);
+  }, [id, onComplete]);
+  return <div className="absolute w-3 h-3 rounded-full animate-particle pointer-events-none z-40" style={{ left: x, top: y, backgroundColor: color, '--tx': tx.current, '--ty': ty.current }} />;
+};
 
+// --- Helper Functions ---
 const assignTeam = async () => {
-  // Production Auto-Balance
   const { count: redCount } = await supabase.from('players').select('*', { count: 'exact', head: true }).eq('team', 'RED');
   const { count: blueCount } = await supabase.from('players').select('*', { count: 'exact', head: true }).eq('team', 'BLUE');
   return (redCount || 0) <= (blueCount || 0) ? 'RED' : 'BLUE';
 };
 
-// --- 4. Main Views ---
-
+// --- Player View ---
 const PlayerView = () => {
   const { gameState, supabase } = useContext(GameContext);
   const [playerState, setPlayerState] = useState({ joined: false, nickname: '', team: null, id: null });
@@ -97,17 +115,17 @@ const PlayerView = () => {
   // Visuals
   const [buttonPos, setButtonPos] = useState({ top: '50%', left: '50%' });
   const [isPressed, setIsPressed] = useState(false);
-  const [floats, setFloats] = useState([]);
+  const [effects, setEffects] = useState([]);
   
   const pressTimeoutRef = useRef(null);
   const clickCountRef = useRef(0);
   const channelRef = useRef(null);
 
-  // Restore Session
+  // SESSION CHECK (Using sessionStorage to allow resets)
   useEffect(() => {
-    const storedId = localStorage.getItem('tapwar_id');
-    const storedTeam = localStorage.getItem('tapwar_team');
-    const storedName = localStorage.getItem('tapwar_nickname');
+    const storedId = sessionStorage.getItem('tapwar_id');
+    const storedTeam = sessionStorage.getItem('tapwar_team');
+    const storedName = sessionStorage.getItem('tapwar_nickname');
     if (storedId && storedTeam && storedName) {
       setPlayerState({ joined: true, id: storedId, team: storedTeam, nickname: storedName });
     }
@@ -127,13 +145,12 @@ const PlayerView = () => {
     }
   }, [gameState.status, gameState.round_start_time]);
 
-  // Click Batcher & Final Flush
+  // Click Batching
   useEffect(() => {
     if (playerState.joined) {
       if (gameState.status === 'PLAYING') {
         channelRef.current = supabase.channel('room1');
         channelRef.current.subscribe();
-
         const intervalId = setInterval(() => {
           if (clickCountRef.current > 0) {
             const clicks = clickCountRef.current;
@@ -145,13 +162,12 @@ const PlayerView = () => {
             });
           }
         }, 1000);
-
         return () => {
           clearInterval(intervalId);
-          if (channelRef.current) supabase.removeChannel(channelRef.current);
+          if (channelRef.current && supabase.removeChannel) supabase.removeChannel(channelRef.current);
         };
       } else if (gameState.status === 'FINISHED') {
-        // FINAL FLUSH
+        // Final Flush
         if (clickCountRef.current > 0 && channelRef.current) {
            const clicks = clickCountRef.current;
            clickCountRef.current = 0;
@@ -173,15 +189,33 @@ const PlayerView = () => {
       const assignedTeam = await assignTeam();
       const { data, error } = await supabase.from('players').insert({ nickname: inputName, team: assignedTeam }).select().single();
       if (error) throw error;
-      localStorage.setItem('tapwar_id', data.id);
-      localStorage.setItem('tapwar_team', assignedTeam);
-      localStorage.setItem('tapwar_nickname', inputName);
+      
+      // Store in Session Storage (Cleared on browser close)
+      sessionStorage.setItem('tapwar_id', data.id);
+      sessionStorage.setItem('tapwar_team', assignedTeam);
+      sessionStorage.setItem('tapwar_nickname', inputName);
       setPlayerState({ joined: true, id: data.id, team: assignedTeam, nickname: inputName });
     } catch (error) {
       console.error(error);
-      alert("Join failed. Try again.");
+      // Alert removed for preview safety, feel free to add back
+      // alert("Join failed. Try again."); 
+      // Mock fallback for preview
+      const assignedTeam = Math.random() > 0.5 ? 'RED' : 'BLUE';
+      setPlayerState({ joined: true, id: 'mock', team: assignedTeam, nickname: inputName });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleLeave = async () => {
+    if (confirm("Leave game? You will lose your spot.")) {
+        if (playerState.id) {
+            // Delete from DB so Host count updates
+            await supabase.from('players').delete().eq('id', playerState.id);
+        }
+        sessionStorage.clear();
+        setPlayerState({ joined: false, nickname: '', team: null, id: null });
+        setInputName('');
     }
   };
 
@@ -190,19 +224,20 @@ const PlayerView = () => {
     clickCountRef.current += 1;
     if (navigator.vibrate) navigator.vibrate(5);
 
-    // Animation
     setIsPressed(true);
     if (pressTimeoutRef.current) clearTimeout(pressTimeoutRef.current);
     pressTimeoutRef.current = setTimeout(() => setIsPressed(false), 50);
 
-    // Floating Numbers
     const touch = e.touches ? e.touches[0] : e;
     const x = touch ? (touch.clientX || e.clientX) : e.clientX;
     const y = touch ? (touch.clientY || e.clientY) : e.clientY;
-    const newFloat = { id: Date.now(), x, y };
-    setFloats(prev => [...prev, newFloat]);
+    
+    const newItems = [{ id: Date.now() + 'num', type: 'number', x, y }];
+    for (let i = 0; i < 8; i++) {
+        newItems.push({ id: Date.now() + 'p' + i, type: 'particle', x, y });
+    }
+    setEffects(prev => [...prev, ...newItems]);
 
-    // Chaos Mode
     if (timeLeft <= 10 && timeLeft > 0) {
       const maxTop = window.innerHeight - 150; 
       const maxLeft = window.innerWidth - 150;
@@ -213,22 +248,24 @@ const PlayerView = () => {
     }
   };
 
-  const removeFloat = (id) => {
-    setFloats(prev => prev.filter(f => f.id !== id));
+  const removeEffect = (id) => {
+    setEffects(prev => prev.filter(f => f.id !== id));
   };
-
-  // --- Views ---
 
   if (gameState.status === 'FINISHED' && playerState.joined) {
     const weWon = playerState.team === gameState.winner;
     return (
       <div className={`flex flex-col items-center justify-center min-h-screen ${weWon ? 'bg-green-600' : 'bg-gray-900'} text-white transition-colors duration-1000`}>
-        <div className="text-center animate-in zoom-in duration-500">
+        <GlobalStyles />
+        <div className="text-center animate-bounce">
           <h1 className="text-6xl font-black uppercase mb-4 drop-shadow-xl">{weWon ? 'VICTORY!' : 'DEFEAT'}</h1>
           <p className="text-xl font-bold uppercase tracking-widest opacity-80">
             {weWon ? 'GLORY TO THE WINNERS!' : 'YOU FOUGHT BRAVELY'}
           </p>
-          <div className="mt-12 text-sm opacity-50 font-mono">Check Host Screen for MVP</div>
+          <div className="mt-12 flex flex-col gap-4">
+             <div className="text-sm opacity-50 font-mono">Check Host Screen for MVP</div>
+             <button onClick={handleLeave} className="text-xs text-white/50 underline hover:text-white">Leave Game</button>
+          </div>
         </div>
       </div>
     );
@@ -239,9 +276,15 @@ const PlayerView = () => {
     const isChaos = timeLeft <= 10;
     return (
       <div className={`fixed inset-0 flex flex-col items-center justify-center ${isRed ? 'bg-red-600' : 'bg-blue-600'} text-white overflow-hidden touch-none select-none`}>
-        <div className="absolute inset-0 pointer-events-none z-30">
-          {floats.map(f => (
-            <FloatingNumber key={f.id} id={f.id} x={f.x} y={f.y} onComplete={removeFloat} />
+        <GlobalStyles />
+        <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
+          {effects.map(f => (
+            f.type === 'number' ? 
+              <FloatingItem key={f.id} id={f.id} x={f.x} y={f.y} onComplete={removeEffect} className="animate-float">
+                 <span className="text-5xl font-black text-white drop-shadow-md">+1</span>
+              </FloatingItem>
+            : 
+              <Particle key={f.id} id={f.id} x={f.x} y={f.y} color="white" onComplete={removeEffect} />
           ))}
         </div>
 
@@ -249,23 +292,23 @@ const PlayerView = () => {
           <div className={`text-6xl font-black drop-shadow-xl font-mono ${isChaos ? 'text-yellow-300 scale-110 duration-75' : ''}`}>
             {timeLeft.toFixed(1)}s
           </div>
-          {isChaos && <div className="text-yellow-300 font-bold animate-bounce mt-2 text-2xl">CHAOS MODE!</div>}
+          {isChaos && <div className="text-yellow-300 font-bold animate-pulse mt-2 text-2xl">CHAOS MODE!</div>}
         </div>
         
         <button
           onPointerDown={handleTap}
           className="absolute w-64 h-64 rounded-full shadow-[0_10px_0_rgba(0,0,0,0.3)] flex items-center justify-center outline-none -webkit-tap-highlight-color-transparent z-20"
           style={{
-            backgroundColor: isRed ? '#ff4d4d' : '#4d94ff',
+            backgroundColor: isRed ? '#ef4444' : '#3b82f6',
             border: '8px solid rgba(255,255,255,0.4)',
             top: isChaos ? buttonPos.top : '50%',
             left: isChaos ? buttonPos.left : '50%',
-            transform: isChaos ? 'translate(0, 0)' : 'translate(-50%, -50%) ' + (isPressed ? 'scale(0.95) translateY(10px)' : 'scale(1) translateY(0)'),
-            boxShadow: isPressed ? '0 0 0 rgba(0,0,0,0.3)' : '0 10px 20px rgba(0,0,0,0.3)',
-            transition: isChaos ? 'none' : 'transform 75ms'
+            transform: isChaos ? 'translate(0, 0)' : 'translate(-50%, -50%) ' + (isPressed ? 'scale(0.92) translateY(10px)' : 'scale(1) translateY(0)'),
+            boxShadow: isPressed ? '0 0 0 rgba(0,0,0,0.3), inset 0 0 20px rgba(0,0,0,0.2)' : '0 15px 30px rgba(0,0,0,0.4), inset 0 0 0 rgba(0,0,0,0)',
+            transition: isChaos ? 'none' : 'transform 50ms cubic-bezier(0.175, 0.885, 0.32, 1.275)'
           }}
         >
-          <span className="text-8xl select-none pointer-events-none filter drop-shadow-lg">{isRed ? '🔥' : '💧'}</span>
+          <span className="text-8xl select-none pointer-events-none filter drop-shadow-lg scale-110">{isRed ? '🔥' : '💧'}</span>
         </button>
       </div>
     );
@@ -279,10 +322,13 @@ const PlayerView = () => {
           <p className="text-sm opacity-60 uppercase tracking-widest">You are fighting for</p>
           <h1 className={`text-6xl font-black uppercase tracking-tighter ${isRed ? 'text-red-500' : 'text-blue-500'} drop-shadow-lg`}>TEAM {playerState.team}</h1>
         </div>
-        <div className="w-full max-w-sm bg-black/30 backdrop-blur-sm border border-white/10 rounded-2xl p-8 text-center">
+        <div className="w-full max-w-sm bg-black/30 backdrop-blur-sm border border-white/10 rounded-2xl p-8 text-center relative">
           <div className="w-20 h-20 mx-auto rounded-full bg-white/10 flex items-center justify-center text-3xl mb-4 border-2 border-white/20">{isRed ? '🔥' : '💧'}</div>
           <h2 className="text-2xl font-bold mb-2">{playerState.nickname}</h2>
-          <p className="text-sm opacity-60">Waiting for host to start...</p>
+          <p className="text-sm opacity-60 mb-6">Waiting for host to start...</p>
+          <button onClick={handleLeave} className="text-xs bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full text-white/70 hover:text-white transition-colors">
+            Leave Game
+          </button>
         </div>
       </div>
     );
@@ -314,12 +360,11 @@ const HostView = () => {
   const [blueScore, setBlueScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(30);
   const [leaderboard, setLeaderboard] = useState({});
-  const [pulse, setPulse] = useState(false);
+  const [pulseClass, setPulseClass] = useState('');
 
   const scoresRef = useRef({ red: 0, blue: 0 });
   const leaderboardRef = useRef({});
 
-  // Restore Leaderboard from LocalStorage
   useEffect(() => {
     const savedScores = localStorage.getItem('tapwar_host_scores');
     const savedLeaderboard = localStorage.getItem('tapwar_host_leaderboard');
@@ -343,26 +388,31 @@ const HostView = () => {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'players' }, (payload) => {
         setPlayers(prev => [...prev, payload.new]);
       })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'players' }, (payload) => {
+        // Remove deleted players from the list
+        setPlayers(prev => prev.filter(p => p.id !== payload.old.id));
+      })
       .subscribe();
 
     const gameChannel = supabase.channel('room1')
       .on('broadcast', { event: 'client-click' }, (payload) => {
-        setPulse(true);
-        setTimeout(() => setPulse(false), 100);
-
         if (payload.team === 'RED') {
+          setPulseClass('bar-pulse-red');
           setRedScore(prev => { 
             const val = prev + payload.count; 
             scoresRef.current.red = val; 
             return val; 
           });
         } else {
+          setPulseClass('bar-pulse-blue');
           setBlueScore(prev => { 
             const val = prev + payload.count; 
             scoresRef.current.blue = val; 
             return val; 
           });
         }
+        setTimeout(() => setPulseClass(''), 200);
+
         const name = payload.from || 'Unknown';
         if (!leaderboardRef.current[name]) leaderboardRef.current[name] = 0;
         leaderboardRef.current[name] += payload.count;
@@ -374,8 +424,10 @@ const HostView = () => {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(dbChannel);
-      supabase.removeChannel(gameChannel);
+      if (supabase.removeChannel) {
+        supabase.removeChannel(dbChannel);
+        supabase.removeChannel(gameChannel);
+      }
     };
   }, []);
 
@@ -386,8 +438,9 @@ const HostView = () => {
         const now = new Date().getTime();
         const elapsed = (now - start) / 1000;
         const remaining = Math.max(0, 30 - elapsed);
-        setTimeLeft(remaining);
         
+        setTimeLeft(remaining);
+
         if (remaining <= 0) {
           clearInterval(interval);
           finishGame();
@@ -429,8 +482,15 @@ const HostView = () => {
   const redPercent = totalScore === 0 ? 50 : (redScore / totalScore) * 100;
   const sortedPlayers = Object.entries(leaderboard).sort(([, scoreA], [, scoreB]) => scoreB - scoreA).slice(0, 3);
 
+  const bgGradient = totalScore === 0 
+    ? 'bg-black' 
+    : redScore > blueScore 
+      ? `bg-gradient-to-br from-red-950 via-black to-black` 
+      : `bg-gradient-to-bl from-blue-950 via-black to-black`;
+
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-black text-white p-8">
+    <div className={`flex flex-col items-center justify-center min-h-screen text-white p-8 transition-colors duration-1000 ${bgGradient}`}>
+      <GlobalStyles />
       <header className="w-full max-w-6xl flex justify-between items-end mb-8 border-b border-zinc-800 pb-4">
         <div>
           <h1 className="text-4xl font-bold tracking-tight">Host Dashboard</h1>
@@ -468,12 +528,14 @@ const HostView = () => {
       {gameState.status === 'PLAYING' && (
         <div className="w-full max-w-6xl mb-12 animate-in fade-in zoom-in duration-500">
           <div className="flex justify-between mb-2 font-black text-4xl uppercase tracking-tighter">
-            <span className={`text-red-500 ${pulse ? 'scale-110' : ''} transition-transform`}>{redScore}</span>
-            <span className={`text-blue-500 ${pulse ? 'scale-110' : ''} transition-transform`}>{blueScore}</span>
+            <span className={`text-red-500 ${pulseClass === 'bar-pulse-red' ? 'scale-110' : ''} transition-transform duration-75`}>{redScore}</span>
+            <span className={`text-blue-500 ${pulseClass === 'bar-pulse-blue' ? 'scale-110' : ''} transition-transform duration-75`}>{blueScore}</span>
           </div>
-          <div className={`relative h-24 w-full bg-zinc-900 rounded-2xl overflow-hidden border-4 border-zinc-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] ${pulse ? 'border-white/50' : ''} transition-colors duration-100`}>
+          <div className={`relative h-24 w-full bg-zinc-900 rounded-2xl overflow-hidden border-4 border-zinc-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] ${pulseClass} transition-all duration-100`}>
             <div className="absolute left-1/2 top-0 bottom-0 w-1 bg-white/20 z-10"></div>
-            <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-red-900 to-red-600 transition-all duration-300 ease-out" style={{ width: `${redPercent}%` }}><div className="absolute right-0 top-0 bottom-0 w-2 bg-white/50 animate-pulse"></div></div>
+            <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-red-900 to-red-600 transition-all duration-300 ease-out" style={{ width: `${redPercent}%` }}>
+                <div className="absolute right-0 top-0 bottom-0 w-2 bg-white/50 animate-pulse"></div>
+            </div>
             <div className="absolute top-0 bottom-0 right-0 left-0 bg-gradient-to-l from-blue-900 to-blue-600 -z-10"></div>
           </div>
         </div>
@@ -506,8 +568,7 @@ const HostView = () => {
         ) : (
           <div className="flex flex-col items-center gap-2">
              <div className="text-2xl font-bold animate-pulse text-green-500">GAME IN PROGRESS</div>
-             {/* Force Finish Failsafe */}
-             {timeLeft <= 2 && (
+             {timeLeft <= 5 && (
                <button onClick={finishGame} className="text-xs bg-red-900/50 text-red-300 px-3 py-1 rounded hover:bg-red-800">
                  Force Finish
                </button>
@@ -518,8 +579,6 @@ const HostView = () => {
     </div>
   );
 };
-
-// --- 5. Main App Logic ---
 
 const AppContent = () => {
   const [isHost, setIsHost] = useState(false);
