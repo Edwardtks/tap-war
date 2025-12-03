@@ -3,22 +3,38 @@ import React, { useState, useEffect, createContext, useContext, useRef } from 'r
 // ==========================================
 // 1. UNCOMMENT THESE LINES IN YOUR LOCAL PROJECT:
 // ==========================================
-import { createClient } from '@supabase/supabase-js';
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// import { createClient } from '@supabase/supabase-js';
+// const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+// const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-
+// ==========================================
+// 2. DELETE THIS SECTION IN YOUR LOCAL PROJECT (It prevents preview crashes):
+// ==========================================
+const supabase = { 
+  channel: () => ({ on: () => ({ subscribe: () => {} }) }),
+  from: () => ({ 
+    select: () => ({ 
+      single: () => Promise.resolve({ data: null, error: null }),
+      then: (cb) => Promise.resolve({ data: null, error: null }).then(cb)
+    }),
+    insert: () => ({ 
+      select: () => ({ 
+        single: () => Promise.resolve({ data: { id: 'mock-id' }, error: null }) 
+      }) 
+    }),
+    delete: () => ({ eq: () => Promise.resolve({}) })
+  })
+}; 
 // ==========================================
 
 
 /**
- * Tap War - Production Build (v2.3)
+ * Tap War - Production Build (v2.4 - Fixes)
  * Updates:
- * - Fixed Mock Client chaining to prevent White Screen of Death in previews.
- * - SessionStorage: Closing tab resets user identity.
- * - Leave Game: Manual button to delete user.
- * - Host Sync: Host listens for DELETE events.
+ * - Fixed Broadcast Payload Destructuring: Real Supabase wraps events in an object.
+ * We now destructure `{ payload }` to access data correctly, fixing the NaN/0 score bug.
+ * - Added safety checks for count arithmetic.
  */
 
 // --- Global Styles ---
@@ -395,18 +411,19 @@ const HostView = () => {
       .subscribe();
 
     const gameChannel = supabase.channel('room1')
-      .on('broadcast', { event: 'client-click' }, (payload) => {
+      // FIXED: Destructure payload correctly from the event envelope
+      .on('broadcast', { event: 'client-click' }, ({ payload }) => {
         if (payload.team === 'RED') {
           setPulseClass('bar-pulse-red');
           setRedScore(prev => { 
-            const val = prev + payload.count; 
+            const val = prev + (payload.count || 0); 
             scoresRef.current.red = val; 
             return val; 
           });
         } else {
           setPulseClass('bar-pulse-blue');
           setBlueScore(prev => { 
-            const val = prev + payload.count; 
+            const val = prev + (payload.count || 0); 
             scoresRef.current.blue = val; 
             return val; 
           });
@@ -415,7 +432,7 @@ const HostView = () => {
 
         const name = payload.from || 'Unknown';
         if (!leaderboardRef.current[name]) leaderboardRef.current[name] = 0;
-        leaderboardRef.current[name] += payload.count;
+        leaderboardRef.current[name] += (payload.count || 0);
         
         setLeaderboard({...leaderboardRef.current});
         localStorage.setItem('tapwar_host_scores', JSON.stringify(scoresRef.current));
