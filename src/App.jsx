@@ -2,19 +2,21 @@ import React, { useState, useEffect, createContext, useContext, useRef } from 'r
 import { createClient } from '@supabase/supabase-js';
 
 // --- PRODUCTION CONFIGURATION ---
-// These keys are pulled from your .env file
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-// Initialize Supabase (Only declared once now)
+// Initialize Supabase
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /**
- * Tap War - Production Build (SECURED)
+ * Tap War - Production Build
  * Features:
- * - Real Supabase Backend
- * - WebSocket Broadcasting
- * - SECURED HOST VIEW (Requires ?mode=host in URL)
+ * - Real Supabase Backend & WebSocket
+ * - Secured Host View (/?mode=host)
+ * - "Force Finish" Failsafe
+ * - Visual "Juice" (Floating +1s, Shake, Pulse)
+ * - Final Score Flush
+ * - Leaderboard Persistence
  */
 
 // --- 1. Game Context ---
@@ -56,28 +58,46 @@ const GameProvider = ({ children }) => {
   );
 };
 
-// --- 2. Helper Functions ---
+// --- 2. Visual Effects Component ---
+
+const FloatingNumber = ({ id, x, y, onComplete }) => {
+  useEffect(() => {
+    const timer = setTimeout(() => onComplete(id), 800);
+    return () => clearTimeout(timer);
+  }, [id, onComplete]);
+
+  return (
+    <div 
+      className="absolute text-4xl font-black text-white pointer-events-none animate-float-up"
+      style={{ left: x, top: y, textShadow: '0 2px 4px rgba(0,0,0,0.5)' }}
+    >
+      +1
+    </div>
+  );
+};
+
+// --- 3. Helper Functions ---
 
 const assignTeam = async () => {
-  // Production Auto-Balance: Check actual DB counts
+  // Production Auto-Balance
   const { count: redCount } = await supabase.from('players').select('*', { count: 'exact', head: true }).eq('team', 'RED');
   const { count: blueCount } = await supabase.from('players').select('*', { count: 'exact', head: true }).eq('team', 'BLUE');
-  
-  // Default to Red if equal, otherwise smaller team
   return (redCount || 0) <= (blueCount || 0) ? 'RED' : 'BLUE';
 };
 
-// --- 3. Components ---
+// --- 4. Main Views ---
 
 const PlayerView = () => {
   const { gameState, supabase } = useContext(GameContext);
   const [playerState, setPlayerState] = useState({ joined: false, nickname: '', team: null, id: null });
   const [inputName, setInputName] = useState('');
   const [loading, setLoading] = useState(false);
-  
   const [timeLeft, setTimeLeft] = useState(30);
+  
+  // Visuals
   const [buttonPos, setButtonPos] = useState({ top: '50%', left: '50%' });
   const [isPressed, setIsPressed] = useState(false);
+  const [floats, setFloats] = useState([]);
   
   const pressTimeoutRef = useRef(null);
   const clickCountRef = useRef(0);
@@ -99,8 +119,7 @@ const PlayerView = () => {
       const interval = setInterval(() => {
         const start = new Date(gameState.round_start_time).getTime();
         const now = new Date().getTime();
-        const elapsed = (now - start) / 1000;
-        const remaining = Math.max(0, 30 - elapsed);
+        const remaining = Math.max(0, 30 - (now - start) / 1000);
         setTimeLeft(remaining);
         if (remaining <= 0) clearInterval(interval);
       }, 100);
@@ -108,28 +127,41 @@ const PlayerView = () => {
     }
   }, [gameState.status, gameState.round_start_time]);
 
-  // Click Batching
+  // Click Batcher & Final Flush
   useEffect(() => {
-    if (playerState.joined && gameState.status === 'PLAYING') {
-      channelRef.current = supabase.channel('room1');
-      channelRef.current.subscribe();
+    if (playerState.joined) {
+      if (gameState.status === 'PLAYING') {
+        channelRef.current = supabase.channel('room1');
+        channelRef.current.subscribe();
 
-      const intervalId = setInterval(() => {
-        if (clickCountRef.current > 0) {
-          const clicksToSend = clickCountRef.current;
-          clickCountRef.current = 0; // Reset
-          channelRef.current.send({
-            type: 'broadcast',
-            event: 'client-click',
-            payload: { team: playerState.team, count: clicksToSend, from: playerState.nickname }
-          });
+        const intervalId = setInterval(() => {
+          if (clickCountRef.current > 0) {
+            const clicks = clickCountRef.current;
+            clickCountRef.current = 0;
+            channelRef.current.send({
+              type: 'broadcast',
+              event: 'client-click',
+              payload: { team: playerState.team, count: clicks, from: playerState.nickname }
+            });
+          }
+        }, 1000);
+
+        return () => {
+          clearInterval(intervalId);
+          if (channelRef.current) supabase.removeChannel(channelRef.current);
+        };
+      } else if (gameState.status === 'FINISHED') {
+        // FINAL FLUSH
+        if (clickCountRef.current > 0 && channelRef.current) {
+           const clicks = clickCountRef.current;
+           clickCountRef.current = 0;
+           channelRef.current.send({
+              type: 'broadcast',
+              event: 'client-click',
+              payload: { team: playerState.team, count: clicks, from: playerState.nickname }
+           });
         }
-      }, 1000); // 1 Second Batch
-
-      return () => {
-        clearInterval(intervalId);
-        if (channelRef.current) supabase.removeChannel(channelRef.current);
-      };
+      }
     }
   }, [playerState.joined, gameState.status, playerState.team]);
 
@@ -137,41 +169,55 @@ const PlayerView = () => {
     e.preventDefault();
     if (!inputName.trim()) return;
     setLoading(true);
-    
     try {
       const assignedTeam = await assignTeam();
       const { data, error } = await supabase.from('players').insert({ nickname: inputName, team: assignedTeam }).select().single();
-      
       if (error) throw error;
-
       localStorage.setItem('tapwar_id', data.id);
       localStorage.setItem('tapwar_team', assignedTeam);
       localStorage.setItem('tapwar_nickname', inputName);
       setPlayerState({ joined: true, id: data.id, team: assignedTeam, nickname: inputName });
     } catch (error) {
-      console.error("Error joining:", error);
-      alert("Could not join game. Try again.");
+      console.error(error);
+      alert("Join failed. Try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleTap = () => {
+  const handleTap = (e) => {
     if (gameState.status !== 'PLAYING') return;
     clickCountRef.current += 1;
     if (navigator.vibrate) navigator.vibrate(5);
+
+    // Animation
     setIsPressed(true);
     if (pressTimeoutRef.current) clearTimeout(pressTimeoutRef.current);
     pressTimeoutRef.current = setTimeout(() => setIsPressed(false), 50);
 
+    // Floating Numbers
+    const touch = e.touches ? e.touches[0] : e;
+    const x = touch ? (touch.clientX || e.clientX) : e.clientX;
+    const y = touch ? (touch.clientY || e.clientY) : e.clientY;
+    const newFloat = { id: Date.now(), x, y };
+    setFloats(prev => [...prev, newFloat]);
+
+    // Chaos Mode
     if (timeLeft <= 10 && timeLeft > 0) {
       const maxTop = window.innerHeight - 150; 
       const maxLeft = window.innerWidth - 150;
-      const newTop = Math.max(50, Math.random() * maxTop);
-      const newLeft = Math.max(50, Math.random() * maxLeft);
-      setButtonPos({ top: `${newTop}px`, left: `${newLeft}px` });
+      setButtonPos({ 
+        top: `${Math.max(50, Math.random() * maxTop)}px`, 
+        left: `${Math.max(50, Math.random() * maxLeft)}px` 
+      });
     }
   };
+
+  const removeFloat = (id) => {
+    setFloats(prev => prev.filter(f => f.id !== id));
+  };
+
+  // --- Views ---
 
   if (gameState.status === 'FINISHED' && playerState.joined) {
     const weWon = playerState.team === gameState.winner;
@@ -180,9 +226,9 @@ const PlayerView = () => {
         <div className="text-center animate-in zoom-in duration-500">
           <h1 className="text-6xl font-black uppercase mb-4 drop-shadow-xl">{weWon ? 'VICTORY!' : 'DEFEAT'}</h1>
           <p className="text-xl font-bold uppercase tracking-widest opacity-80">
-            {weWon ? 'Well done, champion.' : 'Better luck next time.'}
+            {weWon ? 'GLORY TO THE WINNERS!' : 'YOU FOUGHT BRAVELY'}
           </p>
-          <div className="mt-12 text-sm opacity-50 font-mono">Waiting for Host...</div>
+          <div className="mt-12 text-sm opacity-50 font-mono">Check Host Screen for MVP</div>
         </div>
       </div>
     );
@@ -193,12 +239,33 @@ const PlayerView = () => {
     const isChaos = timeLeft <= 10;
     return (
       <div className={`fixed inset-0 flex flex-col items-center justify-center ${isRed ? 'bg-red-600' : 'bg-blue-600'} text-white overflow-hidden touch-none select-none`}>
-        <div className="absolute top-8 text-center z-10 pointer-events-none">
-          <div className="text-6xl font-black drop-shadow-xl font-mono">{timeLeft.toFixed(1)}s</div>
-          {isChaos && <div className="text-yellow-300 font-bold animate-bounce mt-2">CHAOS MODE!</div>}
+        <div className="absolute inset-0 pointer-events-none z-30">
+          {floats.map(f => (
+            <FloatingNumber key={f.id} id={f.id} x={f.x} y={f.y} onComplete={removeFloat} />
+          ))}
         </div>
-        <button onPointerDown={handleTap} className="absolute w-64 h-64 rounded-full shadow-[0_10px_0_rgba(0,0,0,0.3)] flex items-center justify-center outline-none -webkit-tap-highlight-color-transparent z-20" style={{ backgroundColor: isRed ? '#ff4d4d' : '#4d94ff', border: '8px solid rgba(255,255,255,0.3)', top: isChaos ? buttonPos.top : '50%', left: isChaos ? buttonPos.left : '50%', transform: isChaos ? 'translate(0, 0)' : 'translate(-50%, -50%) ' + (isPressed ? 'scale(0.95) translateY(10px)' : 'scale(1) translateY(0)'), boxShadow: isPressed ? '0 0 0 rgba(0,0,0,0.3)' : '0 10px 0 rgba(0,0,0,0.3)', transition: isChaos ? 'none' : 'transform 75ms' }}>
-          <span className="text-8xl select-none pointer-events-none">{isRed ? '🔥' : '💧'}</span>
+
+        <div className="absolute top-8 text-center z-10 pointer-events-none">
+          <div className={`text-6xl font-black drop-shadow-xl font-mono ${isChaos ? 'text-yellow-300 scale-110 duration-75' : ''}`}>
+            {timeLeft.toFixed(1)}s
+          </div>
+          {isChaos && <div className="text-yellow-300 font-bold animate-bounce mt-2 text-2xl">CHAOS MODE!</div>}
+        </div>
+        
+        <button
+          onPointerDown={handleTap}
+          className="absolute w-64 h-64 rounded-full shadow-[0_10px_0_rgba(0,0,0,0.3)] flex items-center justify-center outline-none -webkit-tap-highlight-color-transparent z-20"
+          style={{
+            backgroundColor: isRed ? '#ff4d4d' : '#4d94ff',
+            border: '8px solid rgba(255,255,255,0.4)',
+            top: isChaos ? buttonPos.top : '50%',
+            left: isChaos ? buttonPos.left : '50%',
+            transform: isChaos ? 'translate(0, 0)' : 'translate(-50%, -50%) ' + (isPressed ? 'scale(0.95) translateY(10px)' : 'scale(1) translateY(0)'),
+            boxShadow: isPressed ? '0 0 0 rgba(0,0,0,0.3)' : '0 10px 20px rgba(0,0,0,0.3)',
+            transition: isChaos ? 'none' : 'transform 75ms'
+          }}
+        >
+          <span className="text-8xl select-none pointer-events-none filter drop-shadow-lg">{isRed ? '🔥' : '💧'}</span>
         </button>
       </div>
     );
@@ -247,9 +314,27 @@ const HostView = () => {
   const [blueScore, setBlueScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(30);
   const [leaderboard, setLeaderboard] = useState({});
+  const [pulse, setPulse] = useState(false);
 
   const scoresRef = useRef({ red: 0, blue: 0 });
   const leaderboardRef = useRef({});
+
+  // Restore Leaderboard from LocalStorage
+  useEffect(() => {
+    const savedScores = localStorage.getItem('tapwar_host_scores');
+    const savedLeaderboard = localStorage.getItem('tapwar_host_leaderboard');
+    if (savedScores) {
+      const parsed = JSON.parse(savedScores);
+      scoresRef.current = parsed;
+      setRedScore(parsed.red);
+      setBlueScore(parsed.blue);
+    }
+    if (savedLeaderboard) {
+      const parsed = JSON.parse(savedLeaderboard);
+      leaderboardRef.current = parsed;
+      setLeaderboard(parsed);
+    }
+  }, []);
 
   useEffect(() => {
     supabase.from('players').select().then(({ data }) => { if (data) setPlayers(Array.isArray(data) ? data : []); });
@@ -262,15 +347,29 @@ const HostView = () => {
 
     const gameChannel = supabase.channel('room1')
       .on('broadcast', { event: 'client-click' }, (payload) => {
+        setPulse(true);
+        setTimeout(() => setPulse(false), 100);
+
         if (payload.team === 'RED') {
-          setRedScore(prev => { const val = prev + payload.count; scoresRef.current.red = val; return val; });
+          setRedScore(prev => { 
+            const val = prev + payload.count; 
+            scoresRef.current.red = val; 
+            return val; 
+          });
         } else {
-          setBlueScore(prev => { const val = prev + payload.count; scoresRef.current.blue = val; return val; });
+          setBlueScore(prev => { 
+            const val = prev + payload.count; 
+            scoresRef.current.blue = val; 
+            return val; 
+          });
         }
         const name = payload.from || 'Unknown';
         if (!leaderboardRef.current[name]) leaderboardRef.current[name] = 0;
         leaderboardRef.current[name] += payload.count;
+        
         setLeaderboard({...leaderboardRef.current});
+        localStorage.setItem('tapwar_host_scores', JSON.stringify(scoresRef.current));
+        localStorage.setItem('tapwar_host_leaderboard', JSON.stringify(leaderboardRef.current));
       })
       .subscribe();
 
@@ -288,27 +387,39 @@ const HostView = () => {
         const elapsed = (now - start) / 1000;
         const remaining = Math.max(0, 30 - elapsed);
         setTimeLeft(remaining);
+        
         if (remaining <= 0) {
           clearInterval(interval);
-          const red = scoresRef.current.red;
-          const blue = scoresRef.current.blue;
-          let winner = 'DRAW';
-          if (red > blue) winner = 'RED';
-          if (blue > red) winner = 'BLUE';
-          supabase.from('game_state').update({ status: 'FINISHED', winner }).eq('id', 1);
+          finishGame();
         }
       }, 100);
       return () => clearInterval(interval);
     }
   }, [gameState.status, gameState.round_start_time]);
 
+  const finishGame = async () => {
+    const red = scoresRef.current.red;
+    const blue = scoresRef.current.blue;
+    let winner = 'DRAW';
+    if (red > blue) winner = 'RED';
+    if (blue > red) winner = 'BLUE';
+    await supabase.from('game_state').update({ status: 'FINISHED', winner }).eq('id', 1);
+  };
+
   const handleStartGame = async () => {
-    setRedScore(0); setBlueScore(0); setLeaderboard({}); scoresRef.current = { red: 0, blue: 0 }; leaderboardRef.current = {};
+    localStorage.removeItem('tapwar_host_scores');
+    localStorage.removeItem('tapwar_host_leaderboard');
+    setRedScore(0); setBlueScore(0); setLeaderboard({}); 
+    scoresRef.current = { red: 0, blue: 0 }; leaderboardRef.current = {};
+    
     await supabase.from('game_state').update({ status: 'PLAYING', round_start_time: new Date().toISOString() }).eq('id', 1);
   };
 
   const handleReset = async () => {
-    setRedScore(0); setBlueScore(0); setLeaderboard({}); scoresRef.current = { red: 0, blue: 0 }; leaderboardRef.current = {};
+    localStorage.removeItem('tapwar_host_scores');
+    localStorage.removeItem('tapwar_host_leaderboard');
+    setRedScore(0); setBlueScore(0); setLeaderboard({}); 
+    scoresRef.current = { red: 0, blue: 0 }; leaderboardRef.current = {};
     await supabase.from('game_state').update({ status: 'LOBBY', winner: null, round_start_time: null }).eq('id', 1);
   };
 
@@ -349,7 +460,7 @@ const HostView = () => {
                 <div className="text-zinc-400 font-mono text-xl">{score} clicks</div>
               </div>
             ))}
-            {sortedPlayers.length === 0 && <div className="col-span-3 text-center text-zinc-500 py-8 italic">No clicks recorded!</div>}
+            {sortedPlayers.length === 0 && <div className="col-span-3 text-center text-zinc-500 py-8 italic">No clicks recorded yet!</div>}
           </div>
         </div>
       )}
@@ -357,10 +468,10 @@ const HostView = () => {
       {gameState.status === 'PLAYING' && (
         <div className="w-full max-w-6xl mb-12 animate-in fade-in zoom-in duration-500">
           <div className="flex justify-between mb-2 font-black text-4xl uppercase tracking-tighter">
-            <span className="text-red-500">{redScore}</span>
-            <span className="text-blue-500">{blueScore}</span>
+            <span className={`text-red-500 ${pulse ? 'scale-110' : ''} transition-transform`}>{redScore}</span>
+            <span className={`text-blue-500 ${pulse ? 'scale-110' : ''} transition-transform`}>{blueScore}</span>
           </div>
-          <div className="relative h-24 w-full bg-zinc-900 rounded-2xl overflow-hidden border-4 border-zinc-800 shadow-[0_0_50px_rgba(0,0,0,0.5)]">
+          <div className={`relative h-24 w-full bg-zinc-900 rounded-2xl overflow-hidden border-4 border-zinc-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] ${pulse ? 'border-white/50' : ''} transition-colors duration-100`}>
             <div className="absolute left-1/2 top-0 bottom-0 w-1 bg-white/20 z-10"></div>
             <div className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-red-900 to-red-600 transition-all duration-300 ease-out" style={{ width: `${redPercent}%` }}><div className="absolute right-0 top-0 bottom-0 w-2 bg-white/50 animate-pulse"></div></div>
             <div className="absolute top-0 bottom-0 right-0 left-0 bg-gradient-to-l from-blue-900 to-blue-600 -z-10"></div>
@@ -383,22 +494,37 @@ const HostView = () => {
         </main>
       )}
 
-      <footer className="w-full max-w-6xl mt-12 flex justify-center">
-        {gameState.status === 'LOBBY' ? <button onClick={handleStartGame} disabled={players.length === 0} className="px-12 py-4 bg-white text-black font-black text-xl rounded-full disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">Start Game {players.length === 0 ? "(Waiting for Players)" : `(${players.length} Ready)`}</button>
-        : gameState.status === 'FINISHED' ? <button onClick={handleReset} className="px-12 py-4 bg-white text-black font-black text-xl rounded-full hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">Play Again</button>
-        : <div className="text-2xl font-bold animate-pulse text-green-500">GAME IN PROGRESS</div>}
+      <footer className="w-full max-w-6xl mt-12 flex justify-center pb-8 gap-4">
+        {gameState.status === 'LOBBY' ? (
+           <button onClick={handleStartGame} disabled={players.length === 0} className="px-12 py-4 bg-white text-black font-black text-xl rounded-full disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">
+             Start Game {players.length === 0 ? "(Waiting for Players)" : `(${players.length} Ready)`}
+           </button>
+        ) : gameState.status === 'FINISHED' ? (
+           <button onClick={handleReset} className="px-12 py-4 bg-white text-black font-black text-xl rounded-full hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">
+             Play Again
+           </button>
+        ) : (
+          <div className="flex flex-col items-center gap-2">
+             <div className="text-2xl font-bold animate-pulse text-green-500">GAME IN PROGRESS</div>
+             {/* Force Finish Failsafe */}
+             {timeLeft <= 2 && (
+               <button onClick={finishGame} className="text-xs bg-red-900/50 text-red-300 px-3 py-1 rounded hover:bg-red-800">
+                 Force Finish
+               </button>
+             )}
+          </div>
+        )}
       </footer>
     </div>
   );
 };
 
-// --- 4. Main App Logic ---
+// --- 5. Main App Logic ---
 
 const AppContent = () => {
   const [isHost, setIsHost] = useState(false);
 
   useEffect(() => {
-    // SECURITY FIX: Only allow Host View if URL query param ?mode=host is present
     const params = new URLSearchParams(window.location.search);
     if (params.get('mode') === 'host') {
       setIsHost(true);
